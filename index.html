@@ -733,20 +733,24 @@ function logout(){
   showLoginFlow();
 }
 
+function safeRun(fn, nombre){
+  try{ fn(); }catch(err){ console.error('Error renderizando '+nombre+':', err); }
+}
+
 function applyRolePermissions(){
   const tabAdmin = document.getElementById('tab-admin');
   if(tabAdmin) tabAdmin.style.display = isAdmin() ? '' : 'none';
-  renderCatGrid();
-  renderForm();
-  renderRegistrosTable();
-  renderEstado();
-  renderAlertas();
-  if(isAdmin()){ renderUsuariosTbody(); }
+  // el panel de control (offline) y el resto de las secciones se muestran de forma
+  // independiente: si una sección tiene un error con algún dato, las demás no se ven afectadas.
   const panelControl = document.getElementById('panel-control-sistema');
-  if(panelControl){
-    panelControl.style.display = isProgramador() ? '' : 'none';
-    if(isProgramador()) renderEstadoSistema();
-  }
+  if(panelControl) panelControl.style.display = isProgramador() ? '' : 'none';
+  safeRun(()=>{ if(isProgramador()) renderEstadoSistema(); }, 'control del sistema');
+  safeRun(renderCatGrid, 'panel de carga');
+  safeRun(renderForm, 'formulario de carga');
+  safeRun(renderRegistrosTable, 'tabla de registros');
+  safeRun(renderEstado, 'estado de la flota');
+  safeRun(renderAlertas, 'alertas');
+  if(isAdmin()){ safeRun(renderUsuariosTbody, 'usuarios'); }
 }
 
 function renderEstadoSistema(){
@@ -1694,31 +1698,41 @@ function renderEstado(){
   const soloLectura = !isAdmin();
   const dis = soloLectura ? 'disabled' : '';
   const byCat = {};
-  equipos.forEach(e=>{ (byCat[e.categoria]=byCat[e.categoria]||[]).push(e); });
+  // filtro defensivo: si algún equipo quedó con datos incompletos (por ejemplo de una
+  // sincronización vieja), lo dejamos afuera en vez de romper toda la pestaña Estado.
+  equipos.filter(e=>e && e.id!==undefined && e.id!==null && e.categoria).forEach(e=>{
+    (byCat[e.categoria]=byCat[e.categoria]||[]).push(e);
+  });
 
   const btnNuevo = document.getElementById('btn-toggle-add-equipo');
   if(btnNuevo) btnNuevo.style.display = isAdmin() ? '' : 'none';
 
   cont.innerHTML = Object.keys(byCat).map(cat=>{
-    const list = byCat[cat].filter(e=>!search || (e.denominacion+' '+e.marca).toLowerCase().includes(search));
+   try{
+    const list = byCat[cat].filter(e=>!search || ((e.denominacion||'')+' '+(e.marca||'')).toLowerCase().includes(search));
     if(list.length===0) return '';
     const rows = list.map(e=>{
-      const kmProx = equipoKmHrProximoService(e);
-      const tieneObs = e.observaciones && e.observaciones.trim();
-      return `
-      <tr class="estado-row" data-id="${e.id}">
-        <td class="mono">${e.id.toString().padStart(2,'0')}</td>
-        <td><input data-f="denominacion" value="${e.denominacion||''}" style="font-weight:600;" ${dis} title="Denominación del equipo"></td>
-        <td><input data-f="marca" value="${e.marca||''}" style="width:72px;" ${dis} title="Marca"></td>
-        <td class="sf-cell ${sfEstadoGeneral(e.estadoGeneral)}"><select data-f="estadoGeneral" ${dis} title="ES: en servicio · SL: servicio limitado · FS: fuera de servicio" style="width:56px;"><option value="">—</option><option value="ES" ${e.estadoGeneral==='ES'?'selected':''}>ES</option><option value="SL" ${e.estadoGeneral==='SL'?'selected':''}>SL</option><option value="FS" ${e.estadoGeneral==='FS'?'selected':''}>FS</option></select></td>
-        <td class="sf-cell ${sfDesgaste(e.cubiertas)}"><input data-f="cubiertas" type="number" min="0" max="100" value="${e.cubiertas||''}" placeholder="%" style="width:48px;" ${dis} title="% de desgaste de cubiertas"></td>
-        <td class="sf-cell ${sfDesgaste(e.motorDesgaste)}"><input data-f="motorDesgaste" type="number" min="0" max="100" value="${e.motorDesgaste||''}" placeholder="%" style="width:48px;" ${dis} title="% de desgaste de motor"></td>
-        <td class="mono" style="font-size:11px; white-space:nowrap;" title="Km/Hr registrado en el último service">${e.kmHrUltimoService!==''&&e.kmHrUltimoService!==undefined? e.kmHrUltimoService : '—'}</td>
-        <td class="mono sf-cell" style="font-size:11px; white-space:nowrap;"><span class="${sfKmProximoService(e)}" style="padding-left:12px;" title="Calculado: intervalo de service menos lo recorrido desde el último service">${kmProx!==null? kmProx : '—'}</span></td>
-        <td class="num mono" style="white-space:nowrap; font-size:11px;">${fmtMoney(equipoTotalGasto(e.id))}</td>
-        <td style="text-align:center;"><button class="btn-obs ${tieneObs?'has-text':''}" data-obs-equipo="${e.id}" title="${tieneObs?'Ver observación':'Sin observaciones'}">Obs</button></td>
-        <td class="row-actions">${isAdmin()? `<button class="icon-btn" data-edit-equipo="${e.id}" title="Editar combustible y config. de service">✎</button><button class="icon-btn" data-del-equipo="${e.id}" title="Eliminar equipo">✕</button>` : ''}</td>
-      </tr>`;
+      try{
+        const kmProx = equipoKmHrProximoService(e);
+        const tieneObs = e.observaciones && e.observaciones.trim();
+        return `
+        <tr class="estado-row" data-id="${e.id}">
+          <td class="mono">${String(e.id).padStart(2,'0')}</td>
+          <td><input data-f="denominacion" value="${e.denominacion||''}" style="font-weight:600;" ${dis} title="Denominación del equipo"></td>
+          <td><input data-f="marca" value="${e.marca||''}" style="width:72px;" ${dis} title="Marca"></td>
+          <td class="sf-cell ${sfEstadoGeneral(e.estadoGeneral)}"><select data-f="estadoGeneral" ${dis} title="ES: en servicio · SL: servicio limitado · FS: fuera de servicio" style="width:56px;"><option value="">—</option><option value="ES" ${e.estadoGeneral==='ES'?'selected':''}>ES</option><option value="SL" ${e.estadoGeneral==='SL'?'selected':''}>SL</option><option value="FS" ${e.estadoGeneral==='FS'?'selected':''}>FS</option></select></td>
+          <td class="sf-cell ${sfDesgaste(e.cubiertas)}"><input data-f="cubiertas" type="number" min="0" max="100" value="${e.cubiertas||''}" placeholder="%" style="width:48px;" ${dis} title="% de desgaste de cubiertas"></td>
+          <td class="sf-cell ${sfDesgaste(e.motorDesgaste)}"><input data-f="motorDesgaste" type="number" min="0" max="100" value="${e.motorDesgaste||''}" placeholder="%" style="width:48px;" ${dis} title="% de desgaste de motor"></td>
+          <td class="mono" style="font-size:11px; white-space:nowrap;" title="Km/Hr registrado en el último service">${e.kmHrUltimoService!==''&&e.kmHrUltimoService!==undefined? e.kmHrUltimoService : '—'}</td>
+          <td class="mono sf-cell" style="font-size:11px; white-space:nowrap;"><span class="${sfKmProximoService(e)}" style="padding-left:12px;" title="Calculado: intervalo de service menos lo recorrido desde el último service">${kmProx!==null? kmProx : '—'}</span></td>
+          <td class="num mono" style="white-space:nowrap; font-size:11px;">${fmtMoney(equipoTotalGasto(e.id))}</td>
+          <td style="text-align:center;"><button class="btn-obs ${tieneObs?'has-text':''}" data-obs-equipo="${e.id}" title="${tieneObs?'Ver observación':'Sin observaciones'}">Obs</button></td>
+          <td class="row-actions">${isAdmin()? `<button class="icon-btn" data-edit-equipo="${e.id}" title="Editar combustible y config. de service">✎</button><button class="icon-btn" data-del-equipo="${e.id}" title="Eliminar equipo">✕</button>` : ''}</td>
+        </tr>`;
+      }catch(err){
+        console.error('No se pudo mostrar el equipo', e && e.id, err);
+        return '';
+      }
     }).join('');
     return `<div class="estado-cat">
       <h3>${cat} <span class="count">${list.length} unidades</span></h3>
@@ -1732,6 +1746,10 @@ function renderEstado(){
       </table>
       </div>
     </div>`;
+   }catch(err){
+     console.error('No se pudo mostrar la categoría', cat, err);
+     return '';
+   }
   }).join('');
 
   cont.querySelectorAll('[data-obs-equipo]').forEach(b=>{

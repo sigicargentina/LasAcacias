@@ -709,7 +709,7 @@ function isAdmin(){ return !!currentUser && (currentUser.rol==='admin' || curren
 function isProgramador(){ return !!currentUser && currentUser.rol==='programador'; }
 function canLoadCategory(key){
   if(!currentUser) return false;
-  if(currentUser.rol==='admin') return true;
+  if(isAdmin()) return true; // admin y programador tienen todas las categorías habilitadas
   if(currentUser.rol==='carga') return (currentUser.categoriasPermitidas||[]).includes(key);
   return false;
 }

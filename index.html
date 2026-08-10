@@ -2041,32 +2041,37 @@ function renderStats(){
     <div class="kpi"><div class="lbl">Mayor categoría (mes)</div><div class="val" style="font-size:19px;">${(()=>{const k=Object.keys(monthTotals).sort((a,b)=>monthTotals[b]-monthTotals[a])[0]; return CAT_BY_KEY[k]?CAT_BY_KEY[k].label:'—';})()}</div></div>
   `;
 
-  // chart categoria (mes)
-  const ctxCat = document.getElementById('chart-cat').getContext('2d');
-  if(charts.cat) charts.cat.destroy();
-  charts.cat = new Chart(ctxCat, {
-    type:'bar',
-    data:{
-      labels: CATEGORIAS.map(c=>c.label),
-      datasets:[{ data: CATEGORIAS.map(c=>monthTotals[c.key]||0),
-        backgroundColor:['#a1502c','#8a7f3e','#5d4a8a','#8a3423','#2e6b3a','#28516e','#8a8a8a'] }]
-    },
-    options:{ plugins:{legend:{display:false}}, scales:{ y:{ ticks:{ callback:v=>'$'+v.toLocaleString('es-AR') } } } }
-  });
+  // chart categoria (mes) — si Chart.js no llegó a cargar (red lenta, bloqueo, etc.)
+  // seguimos sin romper el resto de la app, simplemente sin gráfico.
+  if(typeof Chart !== 'undefined'){
+    const ctxCat = document.getElementById('chart-cat').getContext('2d');
+    if(charts.cat) charts.cat.destroy();
+    charts.cat = new Chart(ctxCat, {
+      type:'bar',
+      data:{
+        labels: CATEGORIAS.map(c=>c.label),
+        datasets:[{ data: CATEGORIAS.map(c=>monthTotals[c.key]||0),
+          backgroundColor:['#a1502c','#8a7f3e','#5d4a8a','#8a3423','#2e6b3a','#28516e','#8a8a8a'] }]
+      },
+      options:{ plugins:{legend:{display:false}}, scales:{ y:{ ticks:{ callback:v=>'$'+v.toLocaleString('es-AR') } } } }
+    });
+  }
 
   // chart trend (año)
   const monthlySeries = MESES.map((_,i)=>{
     const l = scopedRegistros(filterByMonth(year, i));
     return l.reduce((s,r)=>s+(Number(r.monto)||0),0);
   });
-  const ctxTrend = document.getElementById('chart-trend').getContext('2d');
-  if(charts.trend) charts.trend.destroy();
-  charts.trend = new Chart(ctxTrend, {
-    type:'line',
-    data:{ labels: MESES.map(m=>m.slice(0,3)),
-      datasets:[{ data: monthlySeries, borderColor:'#4a5a2c', backgroundColor:'rgba(74,90,44,.15)', fill:true, tension:.3, pointRadius:3 }] },
-    options:{ plugins:{legend:{display:false}}, scales:{ y:{ ticks:{ callback:v=>'$'+v.toLocaleString('es-AR') } } } }
-  });
+  if(typeof Chart !== 'undefined'){
+    const ctxTrend = document.getElementById('chart-trend').getContext('2d');
+    if(charts.trend) charts.trend.destroy();
+    charts.trend = new Chart(ctxTrend, {
+      type:'line',
+      data:{ labels: MESES.map(m=>m.slice(0,3)),
+        datasets:[{ data: monthlySeries, borderColor:'#4a5a2c', backgroundColor:'rgba(74,90,44,.15)', fill:true, tension:.3, pointRadius:3 }] },
+      options:{ plugins:{legend:{display:false}}, scales:{ y:{ ticks:{ callback:v=>'$'+v.toLocaleString('es-AR') } } } }
+    });
+  }
 
   // resumen por equipo (mes)
   const tbody = document.getElementById('resumen-equipo-tbody');
@@ -2170,6 +2175,7 @@ function pdfEquipoTable(doc, y, list){
 
 document.getElementById('btn-pdf-mensual').addEventListener('click', ()=>{
   showToast('Generando PDF…');
+  if(typeof window.jspdf === 'undefined'){ showToast('No se pudo generar el PDF: la librería no cargó. Revise su conexión e intente de nuevo.'); return; }
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF();
   const year = Number(document.getElementById('stats-year').value);
@@ -2190,6 +2196,7 @@ document.getElementById('btn-pdf-mensual').addEventListener('click', ()=>{
 
 document.getElementById('btn-pdf-anual').addEventListener('click', ()=>{
   showToast('Generando PDF…');
+  if(typeof window.jspdf === 'undefined'){ showToast('No se pudo generar el PDF: la librería no cargó. Revise su conexión e intente de nuevo.'); return; }
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF();
   const year = Number(document.getElementById('stats-year').value);
@@ -2226,6 +2233,7 @@ document.getElementById('btn-pdf-anual').addEventListener('click', ()=>{
 
 document.getElementById('btn-pdf-flota').addEventListener('click', ()=>{
   showToast('Generando PDF…');
+  if(typeof window.jspdf === 'undefined'){ showToast('No se pudo generar el PDF: la librería no cargó. Revise su conexión e intente de nuevo.'); return; }
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation:'landscape' });
   buildPdfHeader(doc, `Estado de la flota — ${new Date().toLocaleDateString('es-AR')}`);
@@ -2365,6 +2373,7 @@ function renderAlertas(){
 
 document.getElementById('btn-pdf-alertas').addEventListener('click', ()=>{
   showToast('Generando PDF…');
+  if(typeof window.jspdf === 'undefined'){ showToast('No se pudo generar el PDF: la librería no cargó. Revise su conexión e intente de nuevo.'); return; }
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF();
   const alerts = computeAlerts();
@@ -2406,29 +2415,35 @@ document.getElementById('btn-pdf-alertas').addEventListener('click', ()=>{
    INIT
    ============================================================ */
 async function init(){
-  await loadData();
-  await loadUsuarios();
-  renderCatGrid();
-  renderForm();
-  initCargaFilters();
-  renderRegistrosTable();
-  updateRegCount();
-  initAddEquipoForm();
-  initAdminForm();
-  document.getElementById('search-estado').addEventListener('input', renderEstado);
-  initStatsFilters();
-  document.getElementById('unit-count').textContent = equipos.length + ' unidades registradas';
-  document.getElementById('today-label').textContent = new Date().toLocaleDateString('es-AR', {weekday:'long', day:'numeric', month:'long', year:'numeric'});
-  renderAlertas();
+  try{
+    await loadData();
+    await loadUsuarios();
+    renderCatGrid();
+    renderForm();
+    initCargaFilters();
+    renderRegistrosTable();
+    updateRegCount();
+    initAddEquipoForm();
+    initAdminForm();
+    document.getElementById('search-estado').addEventListener('input', renderEstado);
+    initStatsFilters();
+    document.getElementById('unit-count').textContent = equipos.length + ' unidades registradas';
+    document.getElementById('today-label').textContent = new Date().toLocaleDateString('es-AR', {weekday:'long', day:'numeric', month:'long', year:'numeric'});
+    renderAlertas();
 
-  // intenta traer el estado más reciente del Google Sheet antes de mostrar la app;
-  // si no hay respuesta en 7s, seguimos con los datos locales y lo intentamos igual en segundo plano
-  await Promise.race([ syncPullAllSilent(), new Promise(res=>setTimeout(res,7000)) ]);
-  renderCatGrid(); renderForm(); renderRegistrosTable(); updateRegCount(); renderEstado();
-  populateCategoriaSelects(); updateUnitCount(); initStatsFilters(); renderStats(); renderAlertas();
-
-  document.getElementById('loading').style.display='none';
-  showLoginFlow();
+    // intenta traer el estado más reciente del Google Sheet antes de mostrar la app;
+    // si no hay respuesta en 7s, seguimos con los datos locales y lo intentamos igual en segundo plano
+    await Promise.race([ syncPullAllSilent(), new Promise(res=>setTimeout(res,7000)) ]);
+    renderCatGrid(); renderForm(); renderRegistrosTable(); updateRegCount(); renderEstado();
+    populateCategoriaSelects(); updateUnitCount(); initStatsFilters(); renderStats(); renderAlertas();
+  }catch(err){
+    // pase lo que pase (una librería externa que no cargó, un dato inesperado, etc.)
+    // la app NUNCA debe quedar trabada en "Conectando con la base de datos".
+    console.error('Error durante el inicio de la app:', err);
+  }finally{
+    document.getElementById('loading').style.display='none';
+    showLoginFlow();
+  }
 }
 init();
 </script>

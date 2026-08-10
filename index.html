@@ -337,6 +337,7 @@ table.tabla-estado input, table.tabla-estado select{font-size:12px; padding:4px 
 .rol-admin{background:#ded9ea; color:#4a3d73;}
 .rol-carga{background:#d5e6d8; color:#2e5c3a;}
 .rol-visualiza{background:#e6e6d0; color:#5c5a2b;}
+.rol-programador{background:#2b2a22; color:#f0d78c; border:1px solid #f0d78c;}
 
 .perm-check-grid{display:flex; flex-wrap:wrap; gap:8px 16px; margin:4px 0 2px;}
 .perm-check-grid label{display:flex; align-items:center; gap:5px; font-size:12.5px; font-weight:400; text-transform:none; letter-spacing:0; color:var(--ink);}
@@ -545,6 +546,17 @@ table.tabla-estado input, table.tabla-estado select{font-size:12px; padding:4px 
     <div class="section-title"><h2>Administración</h2></div>
     <p class="section-sub">Puede autorizar quién ingresa a la app, qué categorías puede cargar cada persona, y blanquear claves. Esta pestaña solo la ve el Administrador.</p>
 
+    <div class="card pad" id="panel-control-sistema" style="display:none; margin-bottom:22px; border-color:var(--clay);">
+      <b class="display" style="font-size:15px; color:var(--clay-dark);">Control del sistema (solo Programador)</b>
+      <p class="hint" style="margin:6px 0 14px;">Puede poner la app fuera de línea para todos los usuarios (menos usted). Se muestra un mensaje en vez de la pantalla de ingreso.</p>
+      <div id="estado-sistema-actual" style="margin-bottom:12px; font-family:'IBM Plex Mono',monospace; font-size:12.5px;"></div>
+      <div class="field">
+        <label>Mensaje que verán los usuarios</label>
+        <input type="text" id="offline-mensaje" value="Off line - Plan Vencido. Comunicarse con SIGIC.">
+      </div>
+      <button class="btn btn-clay" id="btn-toggle-offline" title="Activar o desactivar el modo fuera de línea para todos los usuarios">Poner sistema Offline</button>
+    </div>
+
     <div class="card pad" style="margin-bottom:22px;">
       <form class="entry" id="form-add-usuario">
         <div class="field"><label>Apellido</label><input type="text" name="apellido" required placeholder="Ej: Pérez"></div>
@@ -560,6 +572,10 @@ table.tabla-estado input, table.tabla-estado select{font-size:12px; padding:4px 
         <div class="field full" id="usuario-categorias-wrap">
           <label>Categorías habilitadas para cargar</label>
           <div class="perm-check-grid" id="usuario-categorias-checks"></div>
+        </div>
+        <div class="field full">
+          <label>Email de recuperación (opcional)</label>
+          <input type="email" name="emailRecuperacion" placeholder="nombre@ejemplo.com" title="Para poder enviarle un código si olvida su clave">
         </div>
         <div class="full" style="display:flex; gap:10px;">
           <button type="submit" class="btn btn-primary">Autorizar persona</button>
@@ -663,6 +679,7 @@ let equipos = [];
 let registros = [];
 let usuarios = [];
 let currentUser = null; // sesión solo en memoria: se cierra sola al recargar la página
+let systemConfig = { offline:false, message:'Off line - Plan Vencido. Comunicarse con SIGIC.' };
 let activeCategoria = CATEGORIAS[0].key;
 let editingId = null;
 let charts = {};
@@ -688,7 +705,8 @@ async function saveUsuarios(){
   try{ await window.storage.set('usuarios', JSON.stringify(usuarios)); }catch(e){ console.error('storage error', e); }
 }
 
-function isAdmin(){ return !!currentUser && currentUser.rol==='admin'; }
+function isAdmin(){ return !!currentUser && (currentUser.rol==='admin' || currentUser.rol==='programador'); }
+function isProgramador(){ return !!currentUser && currentUser.rol==='programador'; }
 function canLoadCategory(key){
   if(!currentUser) return false;
   if(currentUser.rol==='admin') return true;
@@ -700,7 +718,7 @@ function renderUserBadge(){
   const el = document.getElementById('user-badge');
   if(!currentUser){ el.style.display='none'; return; }
   el.style.display='flex';
-  const rolLabel = currentUser.rol==='admin' ? 'Administrador' : currentUser.rol==='carga' ? 'Puede cargar' : 'Solo visualiza';
+  const rolLabel = currentUser.rol==='programador' ? 'Programador' : currentUser.rol==='admin' ? 'Administrador' : currentUser.rol==='carga' ? 'Puede cargar' : 'Solo visualiza';
   el.innerHTML = `
     <span class="who">${currentUser.nombre} ${currentUser.apellido||''}<small>DNI ${currentUser.dni}</small></span>
     <span class="rol-badge rol-${currentUser.rol}">${rolLabel}</span>
@@ -724,10 +742,36 @@ function applyRolePermissions(){
   renderEstado();
   renderAlertas();
   if(isAdmin()){ renderUsuariosTbody(); }
+  const panelControl = document.getElementById('panel-control-sistema');
+  if(panelControl){
+    panelControl.style.display = isProgramador() ? '' : 'none';
+    if(isProgramador()) renderEstadoSistema();
+  }
+}
+
+function renderEstadoSistema(){
+  const el = document.getElementById('estado-sistema-actual');
+  const btn = document.getElementById('btn-toggle-offline');
+  const msgInput = document.getElementById('offline-mensaje');
+  if(!el || !btn) return;
+  if(systemConfig.offline){
+    el.innerHTML = `<span class="rol-badge" style="background:#f3d2cc; color:#8a2418;">● OFFLINE</span> — los usuarios (menos Programador) ven el mensaje de fuera de línea`;
+    btn.textContent = 'Volver a poner Online';
+    btn.className = 'btn btn-primary';
+  } else {
+    el.innerHTML = `<span class="rol-badge" style="background:#d5e6d8; color:#2e5c3a;">● ONLINE</span> — el sistema funciona normalmente para todos`;
+    btn.textContent = 'Poner sistema Offline';
+    btn.className = 'btn btn-clay';
+  }
+  if(msgInput) msgInput.value = systemConfig.message;
 }
 
 function showLoginFlow(){
   document.getElementById('login-overlay').style.display = 'flex';
+  if(systemConfig.offline){
+    loginRenderOffline();
+    return;
+  }
   if(!usuarios || usuarios.length===0){
     loginRenderBootstrap();
   } else {
@@ -735,7 +779,25 @@ function showLoginFlow(){
   }
 }
 
+function loginRenderOffline(allowBypass){
+  const card = document.getElementById('login-card');
+  card.innerHTML = `
+    <h2 style="color:var(--bad);">Sistema fuera de línea</h2>
+    <p class="hint" style="font-size:14px; color:var(--ink);">${systemConfig.message}</p>
+    <div class="login-switch" style="margin-top:18px;"><a id="link-programador">Acceso Programador</a></div>
+  `;
+  document.getElementById('link-programador').addEventListener('click', ()=>{
+    if(!usuarios || usuarios.length===0){ loginRenderBootstrap(); }
+    else { loginRenderDni(); }
+  });
+}
+
 function doLogin(usuario){
+  if(systemConfig.offline && usuario.rol!=='programador'){
+    currentUser = null;
+    loginRenderOffline();
+    return;
+  }
   currentUser = usuario;
   document.getElementById('login-overlay').style.display = 'none';
   renderUserBadge();
@@ -753,14 +815,15 @@ function loginRenderBootstrap(){
   const card = document.getElementById('login-card');
   card.innerHTML = `
     <h2>Configuración inicial</h2>
-    <p class="hint">Todavía no hay ningún Administrador configurado. Cree la cuenta de Administrador para empezar a usar la app.</p>
+    <p class="hint">Todavía no hay ninguna cuenta configurada. Esta primera cuenta queda como <b>Programador</b>: acceso total al sistema, protegida — nadie más va a poder editarla ni eliminarla.</p>
     <div class="error-msg" id="login-error"></div>
     <div class="field"><label>Apellido</label><input type="text" id="boot-apellido" required></div>
     <div class="field"><label>Nombre</label><input type="text" id="boot-nombre" required></div>
     <div class="field"><label>DNI</label><input type="text" id="boot-dni" inputmode="numeric" required></div>
     <div class="field"><label>Clave</label><input type="password" id="boot-clave" required></div>
     <div class="field"><label>Repetir clave</label><input type="password" id="boot-clave2" required></div>
-    <button class="btn btn-primary" id="boot-submit">Crear cuenta de Administrador</button>
+    <div class="field"><label>Email de recuperación (opcional, para recuperar la clave si la olvida)</label><input type="email" id="boot-email" placeholder="nombre@ejemplo.com"></div>
+    <button class="btn btn-primary" id="boot-submit">Crear cuenta de Programador</button>
   `;
   document.getElementById('boot-submit').addEventListener('click', async ()=>{
     const apellido = document.getElementById('boot-apellido').value.trim();
@@ -768,11 +831,12 @@ function loginRenderBootstrap(){
     const dni = normDni(document.getElementById('boot-dni').value);
     const clave = document.getElementById('boot-clave').value;
     const clave2 = document.getElementById('boot-clave2').value;
+    const emailRecuperacion = document.getElementById('boot-email').value.trim();
     if(!apellido || !nombre || !dni || !clave){ loginShowError('Complete todos los campos.'); return; }
     if(clave.length<4){ loginShowError('La clave debe tener al menos 4 caracteres.'); return; }
     if(clave!==clave2){ loginShowError('Las claves no coinciden.'); return; }
     const claveHash = await sha256Hex(clave);
-    const nuevo = { dni, apellido, nombre, rol:'admin', categoriasPermitidas:[], claveHash };
+    const nuevo = { dni, apellido, nombre, rol:'programador', categoriasPermitidas:[], claveHash, emailRecuperacion };
     usuarios.push(nuevo);
     await saveUsuarios();
     syncPush('addUsuario', nuevo);
@@ -836,9 +900,10 @@ function loginRenderPassword(usuario){
     <div class="error-msg" id="login-error"></div>
     <div class="field"><label>Clave</label><input type="password" id="pass-input" required></div>
     <button class="btn btn-primary" id="pass-submit">Ingresar</button>
-    <div class="login-switch"><a id="link-back">No soy yo, volver</a></div>
+    <div class="login-switch"><a id="link-back">No soy yo, volver</a> · <a id="link-forgot">¿Olvidó su clave?</a></div>
   `;
   document.getElementById('link-back').addEventListener('click', loginRenderDni);
+  document.getElementById('link-forgot').addEventListener('click', ()=> loginRenderForgotRequest(usuario));
   const submit = async ()=>{
     const p = document.getElementById('pass-input').value;
     const hash = await sha256Hex(p);
@@ -848,6 +913,81 @@ function loginRenderPassword(usuario){
   document.getElementById('pass-submit').addEventListener('click', submit);
   document.getElementById('pass-input').addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
   document.getElementById('pass-input').focus();
+}
+
+// ---- recuperación de clave por email (pide el código a la Web App de Apps Script) ----
+function loginRenderForgotRequest(usuario){
+  const card = document.getElementById('login-card');
+  card.innerHTML = `
+    <h2>Recuperar clave</h2>
+    <p class="hint">Le vamos a enviar un código de verificación al email de recuperación configurado para ${usuario.nombre} ${usuario.apellido}.</p>
+    <div class="error-msg" id="login-error"></div>
+    <button class="btn btn-primary" id="forgot-submit">Enviar código por email</button>
+    <div class="login-switch"><a id="link-back">Volver</a></div>
+  `;
+  document.getElementById('link-back').addEventListener('click', ()=> loginRenderPassword(usuario));
+  document.getElementById('forgot-submit').addEventListener('click', async (e)=>{
+    e.target.disabled = true;
+    e.target.textContent = 'Enviando…';
+    try{
+      const res = await fetch(SHEET_URL, {
+        method:'POST',
+        headers:{ 'Content-Type':'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action:'requestPasswordReset', payload:{ dni: usuario.dni } })
+      });
+      const data = await res.json();
+      if(data.ok){ loginRenderForgotConfirm(usuario); }
+      else { loginShowError(data.error || 'No se pudo enviar el email.'); e.target.disabled=false; e.target.textContent='Enviar código por email'; }
+    }catch(err){
+      loginShowError('No se pudo conectar con el servidor. Intente de nuevo.');
+      e.target.disabled = false; e.target.textContent = 'Enviar código por email';
+    }
+  });
+}
+
+function loginRenderForgotConfirm(usuario){
+  const card = document.getElementById('login-card');
+  card.innerHTML = `
+    <h2>Ingrese el código</h2>
+    <p class="hint">Revise su email — le enviamos un código de 6 dígitos válido por 15 minutos.</p>
+    <div class="error-msg" id="login-error"></div>
+    <div class="field"><label>Código recibido</label><input type="text" id="forgot-code" inputmode="numeric" maxlength="6"></div>
+    <div class="field"><label>Nueva clave</label><input type="password" id="forgot-clave1"></div>
+    <div class="field"><label>Repetir nueva clave</label><input type="password" id="forgot-clave2"></div>
+    <button class="btn btn-primary" id="forgot-confirm-submit">Confirmar y cambiar clave</button>
+    <div class="login-switch"><a id="link-resend">Reenviar código</a> · <a id="link-back">Volver</a></div>
+  `;
+  document.getElementById('link-back').addEventListener('click', loginRenderDni);
+  document.getElementById('link-resend').addEventListener('click', ()=> loginRenderForgotRequest(usuario));
+  document.getElementById('forgot-confirm-submit').addEventListener('click', async ()=>{
+    const code = document.getElementById('forgot-code').value.trim();
+    const p1 = document.getElementById('forgot-clave1').value;
+    const p2 = document.getElementById('forgot-clave2').value;
+    if(!code){ loginShowError('Ingrese el código recibido.'); return; }
+    if(!p1 || p1.length<4){ loginShowError('La clave debe tener al menos 4 caracteres.'); return; }
+    if(p1!==p2){ loginShowError('Las claves no coinciden.'); return; }
+    const claveHash = await sha256Hex(p1);
+    try{
+      const res = await fetch(SHEET_URL, {
+        method:'POST',
+        headers:{ 'Content-Type':'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action:'confirmPasswordReset', payload:{ dni: usuario.dni, code, claveHash } })
+      });
+      const data = await res.json();
+      if(data.ok){
+        usuario.claveHash = claveHash;
+        const local = usuarios.find(u=>u.dni===usuario.dni);
+        if(local) local.claveHash = claveHash;
+        await saveUsuarios();
+        showToast('Clave actualizada ✓');
+        doLogin(usuario);
+      } else {
+        loginShowError(data.error || 'Código incorrecto o vencido.');
+      }
+    }catch(err){
+      loginShowError('No se pudo conectar con el servidor. Intente de nuevo.');
+    }
+  });
 }
 
 function loginRenderVisualiza(prefillDni){
@@ -880,6 +1020,29 @@ function renderCategoriaChecks(seleccionadas){
 }
 
 function initAdminForm(){
+  const btnOffline = document.getElementById('btn-toggle-offline');
+  if(btnOffline){
+    btnOffline.addEventListener('click', async ()=>{
+      const nuevoEstado = !systemConfig.offline;
+      const mensaje = document.getElementById('offline-mensaje').value.trim() || 'Off line - Plan Vencido. Comunicarse con SIGIC.';
+      if(nuevoEstado && !confirm('¿Poner el sistema OFFLINE para todos los usuarios (menos usted)? Van a ver el mensaje configurado en vez de poder ingresar.')) return;
+      showToast(nuevoEstado ? 'Poniendo sistema offline…' : 'Reactivando el sistema…');
+      systemConfig.offline = nuevoEstado;
+      systemConfig.message = mensaje;
+      try{
+        await fetch(SHEET_URL, {
+          method:'POST',
+          headers:{ 'Content-Type':'text/plain;charset=utf-8' },
+          body: JSON.stringify({ action:'setConfig', payload:{ offline: nuevoEstado, message: mensaje } })
+        });
+        showToast(nuevoEstado ? 'Sistema puesto en Offline ✓' : 'Sistema reactivado ✓');
+      }catch(err){
+        showToast('No se pudo avisar al servidor, pero quedó aplicado en este dispositivo.');
+      }
+      renderEstadoSistema();
+    });
+  }
+
   const form = document.getElementById('form-add-usuario');
   const rolSelect = document.getElementById('usuario-rol-select');
   const catWrap = document.getElementById('usuario-categorias-wrap');
@@ -896,13 +1059,14 @@ function initAdminForm(){
     const apellido = (fd.get('apellido')||'').trim();
     const nombre = (fd.get('nombre')||'').trim();
     const dni = normDni(fd.get('dni'));
-    const rol = fd.get('rol');
+    const rol = fd.get('rol'); // el select solo ofrece 'carga' / 'admin' — el rol "programador" no se puede crear desde acá
+    const emailRecuperacion = (fd.get('emailRecuperacion')||'').trim();
     if(!apellido || !nombre || !dni){ showToast('Complete apellido, nombre y DNI'); return; }
     if(usuarios.some(u=>u.dni===dni)){ showToast('Ya existe una persona autorizada con ese DNI'); return; }
     const categoriasPermitidas = rol==='carga'
       ? Array.from(form.querySelectorAll('#usuario-categorias-checks input:checked')).map(c=>c.value)
       : [];
-    const nuevo = { dni, apellido, nombre, rol, categoriasPermitidas, claveHash:'' };
+    const nuevo = { dni, apellido, nombre, rol, categoriasPermitidas, claveHash:'', emailRecuperacion };
     showToast('Agregando persona…');
     usuarios.push(nuevo);
     await saveUsuarios();
@@ -923,17 +1087,20 @@ function renderUsuariosTbody(){
     return;
   }
   tbody.innerHTML = usuarios.map(u=>{
-    const rolLabel = u.rol==='admin' ? 'Administrador' : 'Puede cargar';
+    const rolLabel = u.rol==='programador' ? 'Programador' : u.rol==='admin' ? 'Administrador' : 'Puede cargar';
     const cats = (u.categoriasPermitidas||[]).map(k=> CAT_BY_KEY[k]? CAT_BY_KEY[k].label : k).join(', ') || '—';
+    const esProgramador = u.rol==='programador';
     return `<tr>
       <td>${u.apellido}, ${u.nombre}</td>
       <td class="mono">${u.dni}</td>
       <td><span class="rol-badge rol-${u.rol}">${rolLabel}</span></td>
-      <td style="font-size:12px;">${u.rol==='admin' ? '— (acceso total)' : cats}</td>
+      <td style="font-size:12px;">${u.rol==='programador'||u.rol==='admin' ? '— (acceso total)' : cats}</td>
       <td style="font-size:11px; color:var(--ink-soft);">${u.claveHash ? 'Definida' : 'Sin definir (pedirá crearla)'}</td>
       <td class="row-actions">
-        <button class="icon-btn" data-reset="${u.dni}" title="Blanquear clave">🔑</button>
-        <button class="icon-btn" data-del-usuario="${u.dni}" title="Eliminar">✕</button>
+        ${esProgramador
+          ? `<span title="Esta cuenta es del Programador: protegida, nadie puede editarla ni eliminarla" style="font-size:15px;">🔒</span>`
+          : `<button class="icon-btn" data-reset="${u.dni}" title="Blanquear clave">🔑</button>
+             <button class="icon-btn" data-del-usuario="${u.dni}" title="Eliminar">✕</button>`}
       </td>
     </tr>`;
   }).join('');
@@ -1129,6 +1296,10 @@ async function syncPullAllSilent(){
       });
       usuarios = mergeByField(usuarios, remoteUsuarios, 'dni');
       await saveUsuarios();
+    }
+    if(data.config){
+      systemConfig.offline = !!data.config.offline;
+      systemConfig.message = data.config.message || systemConfig.message;
     }
     setConnBadge('ok');
   }catch(e){

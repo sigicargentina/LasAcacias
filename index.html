@@ -2064,7 +2064,42 @@ function doLogin(usuario){
   renderUserBadge();
   applyRolePermissions();
   activarVistaInicialSegunRol();
+
+  // Al completar el login se vuelve a comprobar automáticamente la conexión
+  // y se traen los datos más recientes. La Portada se muestra de inmediato
+  // mientras el indicador queda en "Verificando…".
+  sincronizarAlIngresar();
+
   if(isAdmin()) setTimeout(showStockLoginAlerts, 120);
+}
+
+async function sincronizarAlIngresar(){
+  setConnBadge('pending');
+  renderHomeDashboard();
+  try{
+    await syncPullAllSilent();
+    await reconciliarEquiposBase();
+
+    // Actualiza todas las vistas que dependen de la base, incluida la Portada.
+    renderCatGrid();
+    renderForm();
+    renderRegistrosTable();
+    updateRegCount();
+    renderEstado();
+    populateCategoriaSelects();
+    updateUnitCount();
+    initStatsFilters();
+    renderStats();
+    renderAlertas();
+    if(isAdmin()) renderStock();
+    renderStockEmailChips();
+    renderHomeDashboard();
+    applyRolePermissions();
+  }catch(e){
+    console.error('Error al sincronizar después del login:', e);
+    setConnBadge('fail');
+    renderHomeDashboard();
+  }
 }
 
 function loginShowError(msg){

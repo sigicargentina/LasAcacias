@@ -752,6 +752,42 @@ body.home-active main{
   </div>
 </div>
 
+
+<div id="pdf-registros-modal" class="sys-modal-overlay" aria-hidden="true">
+  <div class="sys-modal-card" role="dialog" aria-modal="true" aria-labelledby="pdf-registros-title">
+    <div class="sys-modal-icon">📄</div>
+    <h3 id="pdf-registros-title">PDF de registros</h3>
+    <p>Seleccione qué período desea incluir en el informe.</p>
+
+    <div class="field" style="margin-top:14px;">
+      <label>Período</label>
+      <select id="pdf-registros-tipo">
+        <option value="mes">Mes actual</option>
+        <option value="rango">Rango de meses</option>
+        <option value="todos">Todos los registros</option>
+      </select>
+    </div>
+
+    <div id="pdf-registros-rango" style="display:none; margin-top:12px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div class="field">
+          <label>Desde</label>
+          <input type="month" id="pdf-registros-desde">
+        </div>
+        <div class="field">
+          <label>Hasta</label>
+          <input type="month" id="pdf-registros-hasta">
+        </div>
+      </div>
+    </div>
+
+    <div class="sys-modal-actions">
+      <button type="button" class="btn btn-ghost" id="pdf-registros-cancel">Cancelar</button>
+      <button type="button" class="btn btn-clay" id="pdf-registros-generar">Generar PDF</button>
+    </div>
+  </div>
+</div>
+
 <div id="loading" class="loading-overlay">
   <div class="loading-card">
     <div class="loading-spinner"></div>
@@ -930,9 +966,9 @@ body.home-active main{
       <form class="entry" id="entry-form"></form>
     </div>
 
-    <div class="section-title" style="margin-top:34px;"><h2>Últimos registros</h2></div>
+    <div class="section-title" style="margin-top:34px;"><h2>Últimos registros</h2><span class="tag">más recientes primero</span></div>
     <div class="pdf-top-bar" style="margin-top:-4px; margin-bottom:12px;">
-      <button class="btn btn-clay btn-sm" id="btn-pdf-registros" title="Descargar un PDF con todos los registros históricos, sin limitar a los últimos 150">⬇ PDF Todos los Registros</button>
+      <button class="btn btn-clay btn-sm" id="btn-pdf-registros" title="Generar PDF por mes actual, rango de meses o historial completo">⬇ PDF Registros</button>
     </div>
     <div class="filters-bar">
       <div class="field" style="min-width:220px;">
@@ -1859,8 +1895,55 @@ function renderEstadoSistema(){
   if(msgInput) msgInput.value = systemConfig.message;
 }
 
+
+let loginDbVerified = false;
+
+function loginRenderDbUnavailable(){
+  const card = document.getElementById('login-card');
+  card.innerHTML = `
+    <h2>No se pudo verificar la base de datos</h2>
+    <p class="hint">Por seguridad, SIGIC no habilitará la creación de un nuevo Programador hasta confirmar los usuarios existentes.</p>
+    <div class="error-msg show">Revise la conexión a Internet y vuelva a intentar.</div>
+    <button class="btn btn-primary" id="btn-login-retry-db">🔄 Reintentar conexión</button>
+  `;
+  document.getElementById('btn-login-retry-db').addEventListener('click', verificarBaseYMostrarLogin);
+}
+
+async function verificarBaseYMostrarLogin(){
+  const overlay=document.getElementById('login-overlay');
+  const card=document.getElementById('login-card');
+  overlay.style.display='flex';
+  card.innerHTML=`
+    <div style="text-align:center;padding:8px 0;">
+      <div class="loading-spinner" style="margin:0 auto 14px;"></div>
+      <h2>Verificando usuarios…</h2>
+      <p class="hint">Conectando con la base de datos de Las Acacias.</p>
+    </div>
+  `;
+
+  const ok = await Promise.race([
+    syncPullAllSilent(),
+    new Promise(res=>setTimeout(()=>res(false),10000))
+  ]);
+
+  if(!ok){
+    loginDbVerified=false;
+    loginRenderDbUnavailable();
+    return false;
+  }
+
+  loginDbVerified=true;
+  await saveUsuarios();
+  showLoginFlow();
+  return true;
+}
+
 function showLoginFlow(){
   document.getElementById('login-overlay').style.display = 'flex';
+  if(!loginDbVerified){
+    loginRenderDbUnavailable();
+    return;
+  }
   if(systemConfig.offline){
     loginRenderOffline();
     return;
@@ -1880,7 +1963,8 @@ function loginRenderOffline(allowBypass){
     <div class="login-switch" style="margin-top:18px;"><a id="link-programador">Acceso Programador</a></div>
   `;
   document.getElementById('link-programador').addEventListener('click', ()=>{
-    if(!usuarios || usuarios.length===0){ loginRenderBootstrap(); }
+    if(!loginDbVerified){ loginRenderDbUnavailable(); }
+    else if(!usuarios || usuarios.length===0){ loginRenderBootstrap(); }
     else { loginRenderDni(); }
   });
 }
@@ -2635,8 +2719,11 @@ async function checkConnection(){
     if(!res.ok) throw new Error('bad response');
     await res.json();
     setConnBadge('ok');
+    return true;
   }catch(e){
+    console.error('Error de sincronización:', e);
     setConnBadge('fail');
+    return false;
   }
 }
 
@@ -3121,6 +3208,9 @@ function renderRegistrosTable(){
       if(!hay.includes(search)) return false;
     }
     return true;
+  }).sort((a,b)=>{
+    const f = String(b.fecha||'').localeCompare(String(a.fecha||''));
+    return f || (Number(b.id)||0)-(Number(a.id)||0);
   }).slice(0,150);
 
   if(list.length===0){
@@ -3988,26 +4078,110 @@ function pdfEquipoTable(doc, y, list){
   });
 }
 
-document.getElementById('btn-pdf-registros').addEventListener('click', ()=>{
-  showToast('Generando PDF con todos los registros…');
+
+function ordenarRegistrosPorFechaDesc(list){
+  return [...(list||[])].sort((a,b)=>{
+    const f = String(b.fecha||'').localeCompare(String(a.fecha||''));
+    return f || (Number(b.id)||0)-(Number(a.id)||0);
+  });
+}
+
+function mesActualISO(){
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+}
+
+function nombreMesPeriodo(ym){
+  if(!/^\d{4}-\d{2}$/.test(String(ym||''))) return String(ym||'');
+  const [y,m] = ym.split('-').map(Number);
+  return new Date(y,m-1,1).toLocaleDateString('es-AR',{month:'long',year:'numeric'});
+}
+
+function abrirSelectorPdfRegistros(){
+  const ov=document.getElementById('pdf-registros-modal');
+  const tipo=document.getElementById('pdf-registros-tipo');
+  const desde=document.getElementById('pdf-registros-desde');
+  const hasta=document.getElementById('pdf-registros-hasta');
+  const actual=mesActualISO();
+  tipo.value='mes';
+  desde.value=actual;
+  hasta.value=actual;
+  document.getElementById('pdf-registros-rango').style.display='none';
+  ov.classList.add('show');
+  ov.setAttribute('aria-hidden','false');
+}
+
+function cerrarSelectorPdfRegistros(){
+  const ov=document.getElementById('pdf-registros-modal');
+  ov.classList.remove('show');
+  ov.setAttribute('aria-hidden','true');
+}
+
+function seleccionarRegistrosParaPdf(){
+  const tipo=document.getElementById('pdf-registros-tipo').value;
+  let list=[];
+  let periodo='';
+  let archivo='';
+
+  if(tipo==='mes'){
+    const ym=mesActualISO();
+    list=registros.filter(r=>String(r.fecha||'').slice(0,7)===ym);
+    periodo='Mes actual: '+nombreMesPeriodo(ym);
+    archivo=`historial-${ym}`;
+  }else if(tipo==='rango'){
+    const desde=document.getElementById('pdf-registros-desde').value;
+    const hasta=document.getElementById('pdf-registros-hasta').value;
+    if(!desde || !hasta){
+      showToast('Seleccione el mes inicial y el mes final');
+      return null;
+    }
+    if(desde>hasta){
+      showToast('El mes inicial no puede ser posterior al mes final');
+      return null;
+    }
+    list=registros.filter(r=>{
+      const ym=String(r.fecha||'').slice(0,7);
+      return ym && ym>=desde && ym<=hasta;
+    });
+    periodo=`Desde ${nombreMesPeriodo(desde)} hasta ${nombreMesPeriodo(hasta)}`;
+    archivo=`historial-${desde}-a-${hasta}`;
+  }else{
+    list=[...registros];
+    periodo='Todos los registros';
+    archivo='historial-completo';
+  }
+
+  return {list:ordenarRegistrosPorFechaDesc(list), periodo, archivo};
+}
+
+function generarPdfRegistrosSeleccionados(){
+  const seleccion=seleccionarRegistrosParaPdf();
+  if(!seleccion) return;
+
+  const {list,periodo,archivo}=seleccion;
+  if(!list.length){
+    showToast('No hay registros para el período seleccionado');
+    return;
+  }
   if(typeof window.jspdf === 'undefined'){
     showToast('No se pudo generar el PDF: la librería no cargó. Revise su conexión e intente de nuevo.');
     return;
   }
+
+  cerrarSelectorPdfRegistros();
+  showToast('Generando PDF…');
+
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation:'landscape', unit:'mm', format:'a4' });
-  const list = [...registros].sort((a,b)=>{
-    const f = String(b.fecha||'').localeCompare(String(a.fecha||''));
-    return f || (Number(b.id)||0)-(Number(a.id)||0);
-  });
   const total = list.reduce((s,r)=>s+(Number(r.monto)||0),0);
 
   doc.setFont('helvetica','bold');
   doc.setFontSize(16);
-  doc.text('Las Acacias - Historial completo de movimientos', 14, 15);
+  doc.text('Las Acacias - Historial de movimientos', 14, 15);
   doc.setFont('helvetica','normal');
   doc.setFontSize(9);
-  doc.text(`Generado: ${new Date().toLocaleString('es-AR')}   |   Registros: ${list.length}   |   Total histórico: ${fmtMoney(total)}`, 14, 22);
+  doc.text(periodo, 14, 21);
+  doc.text(`Generado: ${new Date().toLocaleString('es-AR')}   |   Registros: ${list.length}   |   Total: ${fmtMoney(total)}`, 14, 26);
 
   const body = list.map(r=>{
     const cat = CAT_BY_KEY[r.categoria];
@@ -4022,7 +4196,7 @@ document.getElementById('btn-pdf-registros').addEventListener('click', ()=>{
   });
 
   doc.autoTable({
-    startY: 28,
+    startY: 31,
     head: [['Fecha','Categoría','Equipo','Detalle','Monto','Cargado por']],
     body,
     theme:'grid',
@@ -4037,15 +4211,23 @@ document.getElementById('btn-pdf-registros').addEventListener('click', ()=>{
       5:{cellWidth:35}
     },
     margin:{left:10,right:10,bottom:12},
-    didDrawPage: data=>{
+    didDrawPage: ()=>{
       const pages = doc.internal.getNumberOfPages();
       doc.setFontSize(7);
       doc.text(`Página ${pages}`, 285, 202, {align:'right'});
     }
   });
-  doc.save(`historial-completo-registros-${todayISO()}.pdf`);
-  showToast('PDF de todos los registros generado ✓');
+
+  doc.save(`${archivo}-${todayISO()}.pdf`);
+  showToast('PDF generado ✓');
+}
+
+document.getElementById('btn-pdf-registros').addEventListener('click', abrirSelectorPdfRegistros);
+document.getElementById('pdf-registros-cancel').addEventListener('click', cerrarSelectorPdfRegistros);
+document.getElementById('pdf-registros-tipo').addEventListener('change', (e)=>{
+  document.getElementById('pdf-registros-rango').style.display = e.target.value==='rango' ? 'block' : 'none';
 });
+document.getElementById('pdf-registros-generar').addEventListener('click', generarPdfRegistrosSeleccionados);
 
 document.getElementById('btn-pdf-mensual').addEventListener('click', ()=>{
   showToast('Generando PDF…');
@@ -4333,19 +4515,32 @@ async function init(){
     document.getElementById('today-label').textContent = new Date().toLocaleDateString('es-AR', {weekday:'long', day:'numeric', month:'long', year:'numeric'});
     renderAlertas();
 
-    // intenta traer el estado más reciente del Google Sheet antes de mostrar la app;
-    // si no hay respuesta en 7s, seguimos con los datos locales y lo intentamos igual en segundo plano
-    await Promise.race([ syncPullAllSilent(), new Promise(res=>setTimeout(res,7000)) ]);
-    await reconciliarEquiposBase(); // por si la sincronización trajo un listado incompleto
-    renderCatGrid(); renderForm(); renderRegistrosTable(); updateRegCount(); renderEstado();
-    populateCategoriaSelects(); updateUnitCount(); initStatsFilters(); renderStats(); renderAlertas(); if(isAdmin()) renderStock(); renderStockEmailChips(); renderHomeDashboard();
+    // Antes de decidir si corresponde mostrar el login normal o la creación inicial
+    // del Programador, SIGIC DEBE confirmar los usuarios contra la base de datos.
+    const dbOk = await Promise.race([
+      syncPullAllSilent(),
+      new Promise(res=>setTimeout(()=>res(false),10000))
+    ]);
+    loginDbVerified = !!dbOk;
+
+    if(dbOk){
+      await reconciliarEquiposBase();
+      renderCatGrid(); renderForm(); renderRegistrosTable(); updateRegCount(); renderEstado();
+      populateCategoriaSelects(); updateUnitCount(); initStatsFilters(); renderStats(); renderAlertas();
+      if(isAdmin()) renderStock();
+      renderStockEmailChips();
+      renderHomeDashboard();
+    }
   }catch(err){
-    // pase lo que pase (una librería externa que no cargó, un dato inesperado, etc.)
-    // la app NUNCA debe quedar trabada en "Conectando con la base de datos".
     console.error('Error durante el inicio de la app:', err);
+    loginDbVerified = false;
   }finally{
     document.getElementById('loading').style.display='none';
-    showLoginFlow();
+    if(loginDbVerified) showLoginFlow();
+    else {
+      document.getElementById('login-overlay').style.display='flex';
+      loginRenderDbUnavailable();
+    }
   }
 }
 init();

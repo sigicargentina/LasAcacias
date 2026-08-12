@@ -2815,8 +2815,11 @@ async function syncPullAllSilent(){
     if(Array.isArray(data.stockCompras)){ stockCompras = data.stockCompras.map(c=>({...c,id:Number(c.id),litros:Number(c.litros)||0})); }
     if(data.stockConfig){ const legacy=Array.isArray(data.stockConfig.emails)?data.stockConfig.emails:[]; stockConfig = { ...stockConfig, ...data.stockConfig, loadEmails:Array.isArray(data.stockConfig.loadEmails)?data.stockConfig.loadEmails:legacy, criticalEmails:Array.isArray(data.stockConfig.criticalEmails)?data.stockConfig.criticalEmails:legacy, silencedItems:Array.isArray(data.stockConfig.silencedItems)?data.stockConfig.silencedItems:[] }; }
     setConnBadge('ok');
+    return true;
   }catch(e){
+    console.error('Error de sincronización:', e);
     setConnBadge('fail');
+    return false;
   }
 }
 

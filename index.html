@@ -2777,7 +2777,15 @@ async function syncPullAllSilent(){
       const idsBaja = new Set((equiposBaja||[]).map(e=>Number(e.id)));
       // Una baja local también actúa como "tombstone": si quedó pendiente de sincronizar por falta de red,
       // un listado activo viejo del Sheet no vuelve a hacer aparecer ese equipo.
-      const remoteEquipos = data.equipos.map(e=> ({ ...e, id:Number(e.id), anio: e.anio? Number(e.anio): null })).filter(e=>!idsBaja.has(Number(e.id)));
+      const remoteEquipos = data.equipos.map(e=>{
+        const obj = { ...e, id:Number(e.id), anio: e.anio? Number(e.anio): null };
+        if(obj.kmHrProximoServiceObjetivo==='' || obj.kmHrProximoServiceObjetivo===null || obj.kmHrProximoServiceObjetivo===undefined){
+          delete obj.kmHrProximoServiceObjetivo;
+        }else{
+          obj.kmHrProximoServiceObjetivo = Number(obj.kmHrProximoServiceObjetivo);
+        }
+        return obj;
+      }).filter(e=>!idsBaja.has(Number(e.id)));
       equipos = mergeById(equipos.filter(e=>!idsBaja.has(Number(e.id))), remoteEquipos).map(e=>({...e, id:Number(e.id)})).sort((a,b)=>a.id-b.id);
       await saveEquipos();
     }
@@ -3080,25 +3088,12 @@ function renderForm(prefill){
         creadoPorNombre: original.creadoPorNombre,
       };
       cat.fields.forEach(f=>{ if(f.key!=='monto') reg[f.key] = fd.get(f.key)||''; });
-      const equipoAnteriorId = original.equipoId;
-      const categoriaAnterior = original.categoria;
       registros[idx] = reg;
       showToast('Guardando cambios…');
       await saveRegistros();
-      await syncPushAwait('updateRegistro', reg);
-
-      // Una edición también puede cambiar qué asiento es el último válido.
-      // Recalculamos el equipo anterior y el nuevo desde el historial completo.
-      await recalcularEstadoEquipoDesdeRegistros(equipoAnteriorId, categoriaAnterior);
-      if(Number(reg.equipoId)!==Number(equipoAnteriorId) || reg.categoria!==categoriaAnterior){
-        await recalcularEstadoEquipoDesdeRegistros(reg.equipoId, reg.categoria);
-      }else{
-        // Para campos de impacto directo del registro editado (cubiertas/motor),
-        // la reconstrucción anterior ya tomó el valor más reciente del historial.
-        await recalcularEstadoEquipoDesdeRegistros(reg.equipoId, reg.categoria);
-      }
-
-      showToast('Registro actualizado y efectos recalculados ✓');
+      syncPush('updateRegistro', reg);
+      await applyImpactoEnEstado(reg);
+      showToast('Registro actualizado ✓');
       editingId = null;
       renderForm();
     } else {
@@ -3162,7 +3157,13 @@ async function applyImpactoEnEstado(reg){
   // (de ahí se calcula solo el "Km/Hs Próx. Serv.")
   if(reg.categoria==='service' && reg.horasKm!==undefined && reg.horasKm!==''){
     const nuevo = Number(reg.horasKm);
-    if(!isNaN(nuevo)){ eq.kmHrUltimoService = nuevo; cambio = true; }
+    if(!isNaN(nuevo)){
+      eq.kmHrUltimoService = nuevo;
+      // Un Service nuevo constituye una referencia real: deja sin efecto cualquier
+      // corrección manual anterior del "Km/Hs al próximo service".
+      delete eq.kmHrProximoServiceObjetivo;
+      cambio = true;
+    }
   }
 
   // cualquier asiento que declare Horas/Km actual (combustible o service) actualiza el
@@ -3183,87 +3184,32 @@ async function applyImpactoEnEstado(reg){
 }
 
 
-// Recalcula el Estado del equipo a partir de los registros QUE QUEDAN.
-// Se usa después de eliminar un movimiento para que borrar sea realmente reversible:
-// el sistema queda como si ese asiento nunca se hubiera cargado.
-async function recalcularEstadoEquipoDesdeRegistros(equipoId, categoriaEliminada=''){
-  const eq = equipos.find(e=>e.id===Number(equipoId));
+async function recalcularEstadoEquipoDesdeRegistros(equipoId){
+  const eq = equipos.find(e=>Number(e.id)===Number(equipoId));
   if(!eq) return;
 
   const regsEq = registros
     .filter(r=>Number(r.equipoId)===Number(equipoId))
     .sort((a,b)=>{
-      const f = String(a.fecha||'').localeCompare(String(b.fecha||''));
+      const f=String(a.fecha||'').localeCompare(String(b.fecha||''));
       return f || (Number(a.id)||0)-(Number(b.id)||0);
     });
 
-  let cambio = false;
+  // Si existe una corrección manual vigente, se respeta.
+  if(eq.kmHrProximoServiceObjetivo===undefined || eq.kmHrProximoServiceObjetivo===''){
+    const lecturas=regsEq.filter(r=>r.horasKm!==undefined && r.horasKm!=='' && !isNaN(Number(r.horasKm)));
+    eq.kmHrActual=lecturas.length ? Number(lecturas[lecturas.length-1].horasKm) : '';
 
-  // 1) Km/Hs actual: último valor declarado en cualquier movimiento que aún exista.
-  const lecturas = regsEq.filter(r=>
-    r.horasKm!==undefined && r.horasKm!=='' && !isNaN(Number(r.horasKm))
-  );
-  const kmActual = lecturas.length ? Number(lecturas[lecturas.length-1].horasKm) : '';
-  if(String(eq.kmHrActual ?? '') !== String(kmActual)){
-    eq.kmHrActual = kmActual;
-    cambio = true;
+    const services=regsEq.filter(r=>r.categoria==='service' && r.horasKm!==undefined && r.horasKm!=='' && !isNaN(Number(r.horasKm)));
+    eq.kmHrUltimoService=services.length ? Number(services[services.length-1].horasKm) : '';
   }
 
-  // 2) Último Service: último service válido que aún exista.
-  const services = regsEq.filter(r=>
-    r.categoria==='service' &&
-    r.horasKm!==undefined && r.horasKm!=='' &&
-    !isNaN(Number(r.horasKm))
-  );
-  const kmUltServ = services.length ? Number(services[services.length-1].horasKm) : '';
-  if(String(eq.kmHrUltimoService ?? '') !== String(kmUltServ)){
-    eq.kmHrUltimoService = kmUltServ;
-    cambio = true;
-  }
-
-  // 3) Cubiertas: si se borró un asiento que podía modificar el desgaste,
-  // recupera el último valor válido de cubiertas que permanezca en el historial.
-  if(categoriaEliminada==='cubiertas'){
-    const cambiosCub = regsEq.filter(r=>
-      r.categoria==='cubiertas' &&
-      r.nuevoDesgaste!==undefined && r.nuevoDesgaste!=='' &&
-      !isNaN(Number(r.nuevoDesgaste))
-    );
-    const cub = cambiosCub.length ? Number(cambiosCub[cambiosCub.length-1].nuevoDesgaste) : '';
-    if(String(eq.cubiertas ?? '') !== String(cub)){
-      eq.cubiertas = cub;
-      cambio = true;
-    }
-  }
-
-  // 4) Motor: si se borró Reparación/Taller que modificaba desgaste,
-  // recupera el último valor válido que permanezca en el historial.
-  if(categoriaEliminada==='reparaciones' || categoriaEliminada==='taller'){
-    const cambiosMotor = regsEq.filter(r=>
-      (r.categoria==='reparaciones' || r.categoria==='taller') &&
-      r.afectaMotor==='Sí' &&
-      r.motorNuevoDesgaste!==undefined && r.motorNuevoDesgaste!=='' &&
-      !isNaN(Number(r.motorNuevoDesgaste))
-    );
-    const motor = cambiosMotor.length ? Number(cambiosMotor[cambiosMotor.length-1].motorNuevoDesgaste) : '';
-    if(String(eq.motorDesgaste ?? '') !== String(motor)){
-      eq.motorDesgaste = motor;
-      cambio = true;
-    }
-  }
-
-  if(cambio){
-    await saveEquipos();
-    await syncPushAwait('updateEquipo', equipoParaSync(eq));
-  }
-
-  // Todo lo demás (gastos, estadísticas, stock, alertas) se calcula desde "registros".
-  // Al haber quitado el asiento, basta volver a renderizar para que desaparezca su efecto.
+  await saveEquipos();
+  await syncPushAwait('updateEquipo', equipoParaSync(eq));
   renderEstado();
   renderStats();
   renderAlertas();
   if(isAdmin()) renderStock();
-  renderStockEmailChips();
   renderHomeDashboard();
 }
 
@@ -3341,70 +3287,31 @@ function renderRegistrosTable(){
     b.addEventListener('click', async ()=>{
       const delId = Number(b.dataset.del);
       const reg = registros.find(r=>r.id===delId);
-      if(!reg) return showToast('El registro ya no existe');
-
-      if(!isAdmin() && (!currentUser || reg.creadoPorDni!==currentUser.dni)){
+      if(reg && !isAdmin() && (!currentUser || reg.creadoPorDni!==currentUser.dni)){
         showToast('No puede eliminar un registro cargado por otra persona');
         return;
       }
-
-      const cat = CAT_BY_KEY[reg.categoria];
       const confirmar = await systemConfirm(
-        `¿Eliminar este movimiento?\n\n${cat ? cat.label : reg.categoria} · ${equipoLabel(reg.equipoId)} · ${reg.fecha||''}\n\nSIGIC también deshará automáticamente todos los efectos que este movimiento produjo sobre el equipo, stock, gastos, estadísticas y alertas.`,
-        {title:'Eliminar y recalcular', okText:'Eliminar', icon:'🗑️'}
+        `¿Eliminar este movimiento?\n\n${equipoLabel(reg.equipoId)} · ${reg.fecha||''}\n\nSIGIC eliminará el registro y recalculará sus efectos.`,
+        {title:'Eliminar y recalcular',okText:'Eliminar',icon:'🗑️'}
       );
       if(!confirmar) return;
 
       showToast('Eliminando y recalculando…');
-
-      // Primero lo quitamos del historial local para que TODOS los cálculos siguientes
-      // se hagan como si el movimiento nunca hubiera existido.
       registros = registros.filter(r=>r.id!==delId);
       await saveRegistros();
-
-      // Eliminación en la base.
-      const delResp = await syncPushAwait('deleteRegistro', {id:delId});
-      if(!delResp.ok){
-        // Si la base rechazara el borrado, traemos nuevamente los datos para no dejar
-        // el navegador en un estado diferente al de la planilla.
-        showToast('No se pudo eliminar en la base. Restaurando datos…');
+      const resp = await syncPushAwait('deleteRegistro', {id:delId});
+      if(!resp.ok){
+        showToast('No se pudo eliminar en la base');
         await syncPullAllSilent();
         renderRegistrosTable();
         updateRegCount();
-        renderEstado();
-        renderStats();
-        renderAlertas();
-        if(isAdmin()) renderStock();
-        renderHomeDashboard();
         return;
       }
-
-      // Recalcula último service, Km/Hs actual y los efectos directos de Estado.
-      await recalcularEstadoEquipoDesdeRegistros(reg.equipoId, reg.categoria);
-
-      if(editingId===delId){
-        editingId=null;
-        renderForm();
-      }
-
+      await recalcularEstadoEquipoDesdeRegistros(reg.equipoId);
+      if(editingId===delId){ editingId=null; renderForm(); }
       renderRegistrosTable();
       updateRegCount();
-
-      // Una última lectura silenciosa deja el navegador alineado con la base.
-      setTimeout(async()=>{
-        try{
-          await syncPullAllSilent();
-          renderRegistrosTable();
-          updateRegCount();
-          renderEstado();
-          renderStats();
-          renderAlertas();
-          if(isAdmin()) renderStock();
-          renderStockEmailChips();
-          renderHomeDashboard();
-        }catch(_e){}
-      },450);
-
       showToast('Registro eliminado y efectos recalculados ✓');
     });
   });
@@ -3444,11 +3351,27 @@ function equipoKmHrActualDesdeRegistros(id){
 // Cuánto Km/Hr faltan para el próximo service: intervalo definido para el equipo, menos lo
 // recorrido desde el último service (Km/Hs Actual menos Km/Hs Últ. Serv.).
 function equipoKmHrProximoService(eq){
+  const actual = (eq.kmHrActual!==''&&eq.kmHrActual!==undefined&&eq.kmHrActual!==null && !isNaN(Number(eq.kmHrActual)))
+    ? Number(eq.kmHrActual) : null;
+
+  // Si el Administrador/Programador hizo una corrección manual, guardamos internamente
+  // el Km/Hs objetivo absoluto del próximo service. A partir de ahí, cada nueva lectura
+  // descuenta automáticamente lo recorrido sin perder la corrección realizada.
+  const objetivoManual = (eq.kmHrProximoServiceObjetivo!=='' &&
+                          eq.kmHrProximoServiceObjetivo!==undefined &&
+                          eq.kmHrProximoServiceObjetivo!==null &&
+                          !isNaN(Number(eq.kmHrProximoServiceObjetivo)))
+    ? Number(eq.kmHrProximoServiceObjetivo) : null;
+
+  if(objetivoManual!==null){
+    if(actual===null) return null;
+    return objetivoManual - actual;
+  }
+
   const intervalo = Number(eq.intervaloService);
   const ultimo = Number(eq.kmHrUltimoService);
   if(!intervalo || isNaN(intervalo) || eq.kmHrUltimoService==='' || eq.kmHrUltimoService===undefined) return null;
-  const actual = (eq.kmHrActual!==''&&eq.kmHrActual!==undefined&&eq.kmHrActual!==null) ? Number(eq.kmHrActual) : null;
-  if(actual===null) return intervalo; // todavía no hay ninguna lectura posterior al service: falta el intervalo completo
+  if(actual===null) return intervalo;
   return intervalo - (actual - ultimo);
 }
 
@@ -3456,7 +3379,11 @@ function equipoKmHrProximoService(eq){
 // para que esa columna quede visible también para quien mire la planilla directamente.
 function equipoParaSync(eq){
   const kmProx = equipoKmHrProximoService(eq);
-  return { ...eq, kmHrProximoService: kmProx!==null? kmProx : '' };
+  return {
+    ...eq,
+    kmHrProximoService: kmProx!==null ? kmProx : '',
+    kmHrProximoServiceObjetivo: eq.kmHrProximoServiceObjetivo ?? ''
+  };
 }
 
 // Completa el Km/Hs Actual de los equipos que todavía no lo tienen, usando el último
@@ -3702,6 +3629,13 @@ function abrirEditorEquipo(id){
         <label>Km/Hs Actual (corrección manual)</label>
         <input type="number" id="edit-kmHrActual" value="${eq.kmHrActual||''}" placeholder="Ej: 4650" title="Se actualiza solo con cada asiento de combustible o service, pero puede corregirlo acá">
       </div>
+      <div class="field">
+        <label>Km/Hs al Próximo Service (corrección manual)</label>
+        <input type="number" id="edit-kmHrProximoService" value="${equipoKmHrProximoService(eq)!==null ? equipoKmHrProximoService(eq) : ''}" placeholder="Ej: 100" title="Cuántos Km/Hs faltan para el próximo service. La corrección queda como nueva base y luego continúa descontándose automáticamente.">
+        <div style="font-size:10.5px;color:var(--ink-soft);margin-top:4px;line-height:1.35;">
+          Puede corregir este valor. Las próximas cargas de Km/Hs seguirán descontándolo automáticamente. Un nuevo Service reinicia el cálculo normal.
+        </div>
+      </div>
       <button class="btn btn-primary" id="edit-equipo-guardar" title="Guardar los cambios de este equipo">Guardar</button>
       <div class="login-switch"><a id="edit-equipo-cancelar">Cancelar</a></div>
     </div>
@@ -3715,12 +3649,29 @@ function abrirEditorEquipo(id){
     eq.intervaloService = document.getElementById('edit-intervaloService').value;
     eq.kmHrUltimoService = document.getElementById('edit-kmHrUltimoService').value;
     eq.kmHrActual = document.getElementById('edit-kmHrActual').value;
+
+    const proxInput = document.getElementById('edit-kmHrProximoService').value;
+    if(proxInput!=='' && !isNaN(Number(proxInput))){
+      const actualNum = Number(eq.kmHrActual);
+      if(eq.kmHrActual==='' || isNaN(actualNum)){
+        showToast('Para corregir el próximo service primero debe indicar Km/Hs Actual');
+        return;
+      }
+      // Guardamos el objetivo absoluto: Actual + lo que falta.
+      // Así, si mañana se cargan más horas/km, el restante baja automáticamente.
+      eq.kmHrProximoServiceObjetivo = actualNum + Number(proxInput);
+    }else{
+      // Si se deja vacío, vuelve al cálculo 100% automático por intervalo y último service.
+      delete eq.kmHrProximoServiceObjetivo;
+    }
+
     showToast('Guardando configuración…');
     await saveEquipos();
-    syncPush('updateEquipo', equipoParaSync(eq));
+    await syncPushAwait('updateEquipo', equipoParaSync(eq));
     cerrar();
     renderEstado();
     renderAlertas();
+    renderHomeDashboard();
     showToast('Equipo actualizado ✓');
   });
 }

@@ -3080,12 +3080,25 @@ function renderForm(prefill){
         creadoPorNombre: original.creadoPorNombre,
       };
       cat.fields.forEach(f=>{ if(f.key!=='monto') reg[f.key] = fd.get(f.key)||''; });
+      const equipoAnteriorId = original.equipoId;
+      const categoriaAnterior = original.categoria;
       registros[idx] = reg;
       showToast('Guardando cambios…');
       await saveRegistros();
-      syncPush('updateRegistro', reg);
-      await applyImpactoEnEstado(reg);
-      showToast('Registro actualizado ✓');
+      await syncPushAwait('updateRegistro', reg);
+
+      // Una edición también puede cambiar qué asiento es el último válido.
+      // Recalculamos el equipo anterior y el nuevo desde el historial completo.
+      await recalcularEstadoEquipoDesdeRegistros(equipoAnteriorId, categoriaAnterior);
+      if(Number(reg.equipoId)!==Number(equipoAnteriorId) || reg.categoria!==categoriaAnterior){
+        await recalcularEstadoEquipoDesdeRegistros(reg.equipoId, reg.categoria);
+      }else{
+        // Para campos de impacto directo del registro editado (cubiertas/motor),
+        // la reconstrucción anterior ya tomó el valor más reciente del historial.
+        await recalcularEstadoEquipoDesdeRegistros(reg.equipoId, reg.categoria);
+      }
+
+      showToast('Registro actualizado y efectos recalculados ✓');
       editingId = null;
       renderForm();
     } else {
@@ -3169,6 +3182,91 @@ async function applyImpactoEnEstado(reg){
   }
 }
 
+
+// Recalcula el Estado del equipo a partir de los registros QUE QUEDAN.
+// Se usa después de eliminar un movimiento para que borrar sea realmente reversible:
+// el sistema queda como si ese asiento nunca se hubiera cargado.
+async function recalcularEstadoEquipoDesdeRegistros(equipoId, categoriaEliminada=''){
+  const eq = equipos.find(e=>e.id===Number(equipoId));
+  if(!eq) return;
+
+  const regsEq = registros
+    .filter(r=>Number(r.equipoId)===Number(equipoId))
+    .sort((a,b)=>{
+      const f = String(a.fecha||'').localeCompare(String(b.fecha||''));
+      return f || (Number(a.id)||0)-(Number(b.id)||0);
+    });
+
+  let cambio = false;
+
+  // 1) Km/Hs actual: último valor declarado en cualquier movimiento que aún exista.
+  const lecturas = regsEq.filter(r=>
+    r.horasKm!==undefined && r.horasKm!=='' && !isNaN(Number(r.horasKm))
+  );
+  const kmActual = lecturas.length ? Number(lecturas[lecturas.length-1].horasKm) : '';
+  if(String(eq.kmHrActual ?? '') !== String(kmActual)){
+    eq.kmHrActual = kmActual;
+    cambio = true;
+  }
+
+  // 2) Último Service: último service válido que aún exista.
+  const services = regsEq.filter(r=>
+    r.categoria==='service' &&
+    r.horasKm!==undefined && r.horasKm!=='' &&
+    !isNaN(Number(r.horasKm))
+  );
+  const kmUltServ = services.length ? Number(services[services.length-1].horasKm) : '';
+  if(String(eq.kmHrUltimoService ?? '') !== String(kmUltServ)){
+    eq.kmHrUltimoService = kmUltServ;
+    cambio = true;
+  }
+
+  // 3) Cubiertas: si se borró un asiento que podía modificar el desgaste,
+  // recupera el último valor válido de cubiertas que permanezca en el historial.
+  if(categoriaEliminada==='cubiertas'){
+    const cambiosCub = regsEq.filter(r=>
+      r.categoria==='cubiertas' &&
+      r.nuevoDesgaste!==undefined && r.nuevoDesgaste!=='' &&
+      !isNaN(Number(r.nuevoDesgaste))
+    );
+    const cub = cambiosCub.length ? Number(cambiosCub[cambiosCub.length-1].nuevoDesgaste) : '';
+    if(String(eq.cubiertas ?? '') !== String(cub)){
+      eq.cubiertas = cub;
+      cambio = true;
+    }
+  }
+
+  // 4) Motor: si se borró Reparación/Taller que modificaba desgaste,
+  // recupera el último valor válido que permanezca en el historial.
+  if(categoriaEliminada==='reparaciones' || categoriaEliminada==='taller'){
+    const cambiosMotor = regsEq.filter(r=>
+      (r.categoria==='reparaciones' || r.categoria==='taller') &&
+      r.afectaMotor==='Sí' &&
+      r.motorNuevoDesgaste!==undefined && r.motorNuevoDesgaste!=='' &&
+      !isNaN(Number(r.motorNuevoDesgaste))
+    );
+    const motor = cambiosMotor.length ? Number(cambiosMotor[cambiosMotor.length-1].motorNuevoDesgaste) : '';
+    if(String(eq.motorDesgaste ?? '') !== String(motor)){
+      eq.motorDesgaste = motor;
+      cambio = true;
+    }
+  }
+
+  if(cambio){
+    await saveEquipos();
+    await syncPushAwait('updateEquipo', equipoParaSync(eq));
+  }
+
+  // Todo lo demás (gastos, estadísticas, stock, alertas) se calcula desde "registros".
+  // Al haber quitado el asiento, basta volver a renderizar para que desaparezca su efecto.
+  renderEstado();
+  renderStats();
+  renderAlertas();
+  if(isAdmin()) renderStock();
+  renderStockEmailChips();
+  renderHomeDashboard();
+}
+
 function editRegistro(id){
   const reg = registros.find(r=>r.id===id);
   if(!reg) return;
@@ -3243,18 +3341,71 @@ function renderRegistrosTable(){
     b.addEventListener('click', async ()=>{
       const delId = Number(b.dataset.del);
       const reg = registros.find(r=>r.id===delId);
-      if(reg && !isAdmin() && (!currentUser || reg.creadoPorDni!==currentUser.dni)){
+      if(!reg) return showToast('El registro ya no existe');
+
+      if(!isAdmin() && (!currentUser || reg.creadoPorDni!==currentUser.dni)){
         showToast('No puede eliminar un registro cargado por otra persona');
         return;
       }
-      showToast('Eliminando registro…');
+
+      const cat = CAT_BY_KEY[reg.categoria];
+      const confirmar = await systemConfirm(
+        `¿Eliminar este movimiento?\n\n${cat ? cat.label : reg.categoria} · ${equipoLabel(reg.equipoId)} · ${reg.fecha||''}\n\nSIGIC también deshará automáticamente todos los efectos que este movimiento produjo sobre el equipo, stock, gastos, estadísticas y alertas.`,
+        {title:'Eliminar y recalcular', okText:'Eliminar', icon:'🗑️'}
+      );
+      if(!confirmar) return;
+
+      showToast('Eliminando y recalculando…');
+
+      // Primero lo quitamos del historial local para que TODOS los cálculos siguientes
+      // se hagan como si el movimiento nunca hubiera existido.
       registros = registros.filter(r=>r.id!==delId);
       await saveRegistros();
-      syncPush('deleteRegistro', {id:delId});
-      if(editingId===delId){ editingId=null; renderForm(); }
+
+      // Eliminación en la base.
+      const delResp = await syncPushAwait('deleteRegistro', {id:delId});
+      if(!delResp.ok){
+        // Si la base rechazara el borrado, traemos nuevamente los datos para no dejar
+        // el navegador en un estado diferente al de la planilla.
+        showToast('No se pudo eliminar en la base. Restaurando datos…');
+        await syncPullAllSilent();
+        renderRegistrosTable();
+        updateRegCount();
+        renderEstado();
+        renderStats();
+        renderAlertas();
+        if(isAdmin()) renderStock();
+        renderHomeDashboard();
+        return;
+      }
+
+      // Recalcula último service, Km/Hs actual y los efectos directos de Estado.
+      await recalcularEstadoEquipoDesdeRegistros(reg.equipoId, reg.categoria);
+
+      if(editingId===delId){
+        editingId=null;
+        renderForm();
+      }
+
       renderRegistrosTable();
       updateRegCount();
-      showToast('Registro eliminado ✓');
+
+      // Una última lectura silenciosa deja el navegador alineado con la base.
+      setTimeout(async()=>{
+        try{
+          await syncPullAllSilent();
+          renderRegistrosTable();
+          updateRegCount();
+          renderEstado();
+          renderStats();
+          renderAlertas();
+          if(isAdmin()) renderStock();
+          renderStockEmailChips();
+          renderHomeDashboard();
+        }catch(_e){}
+      },450);
+
+      showToast('Registro eliminado y efectos recalculados ✓');
     });
   });
 }

@@ -3086,6 +3086,8 @@ function renderForm(prefill){
         monto: montoCalculado,
         creadoPorDni: original.creadoPorDni,
         creadoPorNombre: original.creadoPorNombre,
+        // Conserva la foto del estado anterior al movimiento original.
+        estadoPrevio: original.estadoPrevio || null,
       };
       cat.fields.forEach(f=>{ if(f.key!=='monto') reg[f.key] = fd.get(f.key)||''; });
       registros[idx] = reg;
@@ -3108,6 +3110,11 @@ function renderForm(prefill){
         creadoPorNombre: `${currentUser.nombre} ${currentUser.apellido||''}`.trim(),
       };
       cat.fields.forEach(f=>{ if(f.key!=='monto') reg[f.key] = fd.get(f.key)||''; });
+
+      // Fundamental para una eliminación reversible: registramos cómo estaba exactamente
+      // el equipo antes de que este movimiento modificara Km/Hs, Service, cubiertas o motor.
+      guardarEstadoPrevioMovimiento(reg);
+
       registros.unshift(reg);
       showToast('Guardando registro…');
       await saveRegistros();
@@ -3134,6 +3141,61 @@ function wireConditionalFields(form, cat){
     update();
   });
 }
+
+
+// Guarda una foto exacta del Estado ANTES de aplicar un movimiento.
+// Esto permite que "Eliminar" restaure lo que había realmente, incluso si esos valores
+// provenían de una corrección manual o de una carga histórica anterior no presente en el historial visible.
+function capturarEstadoPrevioEquipo(equipoId){
+  const eq = equipos.find(e=>Number(e.id)===Number(equipoId));
+  if(!eq) return null;
+  return {
+    kmHrActual: eq.kmHrActual ?? '',
+    kmHrUltimoService: eq.kmHrUltimoService ?? '',
+    kmHrProximoServiceObjetivo: eq.kmHrProximoServiceObjetivo ?? '',
+    cubiertas: eq.cubiertas ?? '',
+    motorDesgaste: eq.motorDesgaste ?? ''
+  };
+}
+
+function guardarEstadoPrevioMovimiento(reg){
+  if(!reg || reg.estadoPrevio) return;
+  const snap = capturarEstadoPrevioEquipo(reg.equipoId);
+  if(snap) reg.estadoPrevio = snap;
+}
+
+async function restaurarEstadoPrevioMovimiento(reg){
+  if(!reg || !reg.estadoPrevio) return false;
+  const eq = equipos.find(e=>Number(e.id)===Number(reg.equipoId));
+  if(!eq) return false;
+
+  const prev = reg.estadoPrevio;
+  eq.kmHrActual = prev.kmHrActual ?? '';
+  eq.kmHrUltimoService = prev.kmHrUltimoService ?? '';
+
+  if(prev.kmHrProximoServiceObjetivo!=='' &&
+     prev.kmHrProximoServiceObjetivo!==null &&
+     prev.kmHrProximoServiceObjetivo!==undefined){
+    eq.kmHrProximoServiceObjetivo = prev.kmHrProximoServiceObjetivo;
+  }else{
+    delete eq.kmHrProximoServiceObjetivo;
+  }
+
+  eq.cubiertas = prev.cubiertas ?? '';
+  eq.motorDesgaste = prev.motorDesgaste ?? '';
+
+  await saveEquipos();
+  await syncPushAwait('updateEquipo', equipoParaSync(eq));
+
+  renderEstado();
+  renderStats();
+  renderAlertas();
+  if(isAdmin()) renderStock();
+  renderStockEmailChips();
+  renderHomeDashboard();
+  return true;
+}
+
 
 // Traslada al Estado del equipo el efecto de ciertos asientos:
 // - Cubiertas: si se indicó "% desgaste luego del cambio", actualiza delanteras/traseras según la posición.
@@ -3198,10 +3260,14 @@ async function recalcularEstadoEquipoDesdeRegistros(equipoId){
   // Si existe una corrección manual vigente, se respeta.
   if(eq.kmHrProximoServiceObjetivo===undefined || eq.kmHrProximoServiceObjetivo===''){
     const lecturas=regsEq.filter(r=>r.horasKm!==undefined && r.horasKm!=='' && !isNaN(Number(r.horasKm)));
-    eq.kmHrActual=lecturas.length ? Number(lecturas[lecturas.length-1].horasKm) : '';
+    if(lecturas.length){
+      eq.kmHrActual=Number(lecturas[lecturas.length-1].horasKm);
+    }
 
     const services=regsEq.filter(r=>r.categoria==='service' && r.horasKm!==undefined && r.horasKm!=='' && !isNaN(Number(r.horasKm)));
-    eq.kmHrUltimoService=services.length ? Number(services[services.length-1].horasKm) : '';
+    if(services.length){
+      eq.kmHrUltimoService=Number(services[services.length-1].horasKm);
+    }
   }
 
   await saveEquipos();
@@ -3292,7 +3358,7 @@ function renderRegistrosTable(){
         return;
       }
       const confirmar = await systemConfirm(
-        `¿Eliminar este movimiento?\n\n${equipoLabel(reg.equipoId)} · ${reg.fecha||''}\n\nSIGIC eliminará el registro y recalculará sus efectos.`,
+        `¿Eliminar este movimiento?\n\n${equipoLabel(reg.equipoId)} · ${reg.fecha||''}\n\nSIGIC eliminará el registro y restaurará el estado que tenía el equipo antes de este movimiento.`,
         {title:'Eliminar y recalcular',okText:'Eliminar',icon:'🗑️'}
       );
       if(!confirmar) return;
@@ -3308,11 +3374,20 @@ function renderRegistrosTable(){
         updateRegCount();
         return;
       }
-      await recalcularEstadoEquipoDesdeRegistros(reg.equipoId);
+      // Si este movimiento fue creado por esta versión o una posterior, restaura
+      // EXACTAMENTE los valores que existían antes del movimiento.
+      // Solo para registros viejos sin snapshot usamos el recálculo histórico como respaldo.
+      const restaurado = await restaurarEstadoPrevioMovimiento(reg);
+      if(!restaurado){
+        await recalcularEstadoEquipoDesdeRegistros(reg.equipoId);
+      }
+
       if(editingId===delId){ editingId=null; renderForm(); }
       renderRegistrosTable();
       updateRegCount();
-      showToast('Registro eliminado y efectos recalculados ✓');
+      showToast(restaurado
+        ? 'Registro eliminado · estado anterior restaurado ✓'
+        : 'Registro eliminado · estado recalculado ✓');
     });
   });
 }
